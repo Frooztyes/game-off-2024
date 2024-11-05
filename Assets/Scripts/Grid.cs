@@ -8,6 +8,8 @@ using System.Linq;
 using Unity.VisualScripting;
 using Unity.VisualScripting.Antlr3.Runtime.Misc;
 using UnityEngine;
+using Edge = DungeonGen.Edge;
+using Point = DungeonGen.Point;
 using Random = UnityEngine.Random;
 
 public class Grid {
@@ -47,8 +49,8 @@ public class Grid {
     }
 
     private State NewValueAtPosition(int x, int y, int birthThreshold, int survivalThreshold) {
-        int aliveNeighboor = CheckNeighboor(x, y).Count((v) => v == State.ALIVE);
-        bool cellAlive = data[x, y] == State.ALIVE;
+        int aliveNeighboor = CheckNeighboor(x, y).Count((v) => v != State.DEAD);
+        bool cellAlive = data[x, y] != State.DEAD;
 
         if (cellAlive && aliveNeighboor >= survivalThreshold) return State.ALIVE;
         if (!cellAlive && aliveNeighboor >= birthThreshold) return State.ALIVE;
@@ -118,29 +120,56 @@ public class Grid {
 
     public void Delaunization(IPoint[] points) {
         Delaunator delaunator = new(points);
-        List<DungeonGen.Edge> edges = new List<DungeonGen.Edge>();
+        List<Edge> edges = new();
         
         delaunator.ForEachTriangleEdge(edge => {
             var start = Vector2Int.CeilToInt(edge.P.ToVector2());
             var end = Vector2Int.CeilToInt(edge.Q.ToVector2());
 
-            DungeonGen.Point startPt = new DungeonGen.Point(start.x, start.y);
-            DungeonGen.Point endPt = new DungeonGen.Point(end.x, end.y);
+            Point startPt = new(start.x, start.y);
+            Point endPt = new(end.x, end.y);
             edges.Add(new(startPt, endPt));
-            //CreateTunnel(start.x, start.y, end.x, end.y, 2);
         });
 
         var mstEdges = Kruskal.MinimumSpanningTree(edges);
 
         foreach (var mstEdge in mstEdges) {
             CreateTunnel(mstEdge.a.x, mstEdge.a.y, mstEdge.b.x, mstEdge.b.y, 2);
+            data[mstEdge.a.x, mstEdge.a.y] = State.TRUC;
+            data[mstEdge.b.x, mstEdge.b.y] = State.TRUC;
         }
 
-        for (int i = 0; i < width; i++) {
-            for (int j = 0; j < height; j++) {
-                data[i, j] = data[i, j] == State.DEAD ? State.DEAD : State.ALIVE;
+        var pts = FindDeadEnds(mstEdges);
+        foreach (var pt in pts) {
+            data[pt.x, pt.y] = State.DEAD_END;
+        }
+    }
+
+    public static List<Point> FindDeadEnds(List<Edge> mstEdges) {
+        Dictionary<Point, int> pointDegrees = new();
+
+        foreach (var edge in mstEdges) {
+            if (pointDegrees.ContainsKey(edge.a))
+                pointDegrees[edge.a]++;
+            else
+                pointDegrees[edge.a] = 1;
+
+            if (pointDegrees.ContainsKey(edge.b))
+                pointDegrees[edge.b]++;
+            else
+                pointDegrees[edge.b] = 1;
+        }
+
+        List<Point> deadEnds = new();
+
+        foreach (var point in pointDegrees) {
+            if (point.Value == 1)
+            {
+                deadEnds.Add(point.Key);
             }
         }
+
+        return deadEnds;
     }
 
     public void CreateTunnel(int x0, int y0, int x1, int y1, float wd) {
@@ -180,17 +209,52 @@ public class Grid {
         }
     }
 
+    public void DeadOrAlive() {
+        for (int i = 0; i < width; i++) {
+            for (int j = 0; j < height; j++) {
+                data[i, j] = data[i, j] == State.DEAD ? State.DEAD : State.ALIVE;
+            }
+        }
+    }
+
+    public (State[,] data, Vector3 position)[,] SplitInChunks(int chunkSize) {
+
+        int nbChunksX = (width / chunkSize) + 1;
+        int nbChunksY = (height / chunkSize) + 1;
 
 
+        (State[,] data, Vector3 position)[,] chunks = new (State[,] data, Vector3 position)[nbChunksX, nbChunksY];
 
-    public State this[int row, int col] {
-        get => data[row, col];
-        set => data[row, col] = value;
+        for (int i = 0; i < nbChunksX; i++) {
+            for (int j = 0; j < nbChunksY; j++) {
+                State[,] currentChunk = new State[chunkSize, chunkSize];
+
+                // parcours des valeurs du chunk
+                for (int x = 0; x < chunkSize; x++) {
+                    for (int y = 0; y < chunkSize; y++) {
+                        // Calculer les indices dans `data`
+                        int dataX = i * chunkSize + x;
+                        int dataY = j * chunkSize + y;
+
+                        // Vérifier que les indices sont dans les limites de `data`
+                        if (dataX < width && dataY < height) {
+                            currentChunk[x, y] = data[dataX, dataY];
+                        }
+                        else {
+                            currentChunk[x, y] = State.DEAD; // Valeur par défaut si en dehors des limites
+                        }
+                    }
+                }
+                chunks[i, j] = (currentChunk, new Vector3(i, 0, j));
+            }
+        }
+        return chunks;
     }
 
     public Texture2D ToTexture2D(int textureWidth, int textureHeight) {
-        Texture2D texture = new Texture2D(textureWidth, textureHeight);
-        texture.filterMode = FilterMode.Point;
+        Texture2D texture = new(textureWidth, textureHeight) {
+            filterMode = FilterMode.Point
+        };
 
         float cellWidth = (float)textureWidth / width;
         float cellHeight = (float)textureHeight / height;
@@ -202,16 +266,15 @@ public class Grid {
                     State.DEAD => Color.black,
                     State.VISITED => Color.yellow,
                     State.TRUC => Color.blue,
+                    State.DEAD_END => Color.green,
                     _ => Color.magenta
                 };
 
-                // Remplit les pixels correspondant à une cellule
                 int pixelStartX = Mathf.RoundToInt(x * cellWidth);
                 int pixelStartY = Mathf.RoundToInt(y * cellHeight);
                 int pixelEndX = Mathf.RoundToInt((x + 1) * cellWidth);
                 int pixelEndY = Mathf.RoundToInt((y + 1) * cellHeight);
 
-                // Parcours de la zone de pixels pour appliquer la couleur
                 for (int px = pixelStartX; px < pixelEndX; px++) {
                     for (int py = pixelStartY; py < pixelEndY; py++) {
                         texture.SetPixel(px, py, color);
@@ -228,15 +291,14 @@ public class Grid {
 
     public Sprite ToSprite(int textureWidth, int textureHeight) {
         Texture2D texture = ToTexture2D(textureWidth, textureHeight);
-        Rect rect = new Rect(0, 0, textureWidth, textureHeight);
-        Vector2 pivot = new Vector2(0.5f, 0.5f); // Centre de l'image
+        Rect rect = new(0, 0, textureWidth, textureHeight);
+        Vector2 pivot = new(0.5f, 0.5f);
 
-        // Crée un Sprite à partir de la texture
         return Sprite.Create(texture, rect, pivot);
     }
 
 }
 
 public enum State {
-    ALIVE, DEAD, VISITED, TRUC
+    ALIVE, DEAD, VISITED, TRUC, DEAD_END
 }
